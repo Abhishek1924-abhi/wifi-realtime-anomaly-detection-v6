@@ -1,0 +1,38 @@
+# Python environments
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Datasets and generated data
+data/
+*.csv
+
+# Logs
+logs/
+
+# Old Isolation Forest models
+model/isolation_forest*.pkl
+model/scaler*.pkl
+model/v3/
+model/v5/
+
+# Temporary/demo generated files
+v6_attack_dashboard_demo.csv
+v6_detected_attack_demo.csv
+ftp_ssh_patator_v6_68_features_demo.csv
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# V6 Random Forest model files
+!model/v6/
+!model/v6/features_v6.pkl
+!model/v6/scaler_v6.pkl
+!model/v6/random_forest_v6.pkl
+!model/v6/feature_importance_v6.csv
