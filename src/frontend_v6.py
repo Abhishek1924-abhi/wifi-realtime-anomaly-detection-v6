@@ -27,17 +27,7 @@ RESULT_FILE = os.path.abspath(
     )
 )
 
-DEMO_FILE = os.path.abspath(
-    os.path.join(
-        os.path.dirname(__file__),
-        "..",
-        "data",
-        "results",
-        "v6",
-        "live",
-        "v6_attack_dashboard_demo.csv"
-    )
-)
+DEMO_FILE = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "v6_attack_dashboard_demo.csv"))
 
 # ============================================================
 # PAGE STYLE
@@ -157,80 +147,70 @@ def get_wifi_info():
 # ============================================================
 
 def load_results():
-
-    if not os.path.exists(RESULT_FILE):
+    """Load the live detector CSV using its real header row and schema."""
+    if not os.path.isfile(RESULT_FILE):
         return pd.DataFrame()
 
     try:
-
-        columns = [
-            "Time",
-            "Source_IP",
-            "Source_Port",
-            "Destination_IP",
-            "Destination_Port",
-            "Protocol",
-            "Duration",
-            "Packets",
-            "Prediction",
-            "Confidence"
-        ]
-
-        df = pd.read_csv(
-            RESULT_FILE,
-            names=columns,
-            header=None
-        )
+        # The backend writes a header row. Do not use names=.../header=None,
+        # because that can shift the values and treat the header as a data row.
+        df = pd.read_csv(RESULT_FILE, encoding="utf-8-sig", low_memory=False)
 
         if df.empty:
-            return df
+            return pd.DataFrame()
 
-        # Handle the case where the file contains a header
-        if str(df.iloc[0]["Time"]).lower() in [
-            "timestamp",
-            "time"
-        ]:
+        # Normalize whitespace in column names and map backend names to the
+        # names used by the dashboard below.
+        df.columns = [str(column).strip() for column in df.columns]
+        df = df.rename(columns={
+            "Timestamp": "Time",
+            "Flow_Duration": "Duration",
+        })
 
-            df = df.iloc[1:].copy()
+        required_columns = [
+            "Time", "Source_IP", "Source_Port",
+            "Destination_IP", "Destination_Port", "Protocol",
+            "Duration", "Packets", "Prediction", "Confidence",
+        ]
+        missing_columns = [column for column in required_columns if column not in df.columns]
+        if missing_columns:
+            st.error(
+                "The live results CSV does not match the expected backend schema. "
+                f"Missing columns: {', '.join(missing_columns)}."
+            )
+            st.caption(f"CSV file: {RESULT_FILE}")
+            st.caption(f"Columns found: {', '.join(df.columns.astype(str))}")
+            return pd.DataFrame()
 
-        df["Time"] = pd.to_datetime(
-            df["Time"],
-            errors="coerce"
+        # Convert types safely so one malformed row does not crash the dashboard.
+        df["Time"] = pd.to_datetime(df["Time"], errors="coerce")
+        for column in ["Source_Port", "Destination_Port", "Packets"]:
+            df[column] = pd.to_numeric(df[column], errors="coerce")
+        for column in ["Duration", "Confidence"]:
+            df[column] = pd.to_numeric(df[column], errors="coerce")
+
+        df["Prediction"] = (
+            df["Prediction"].astype("string").str.strip().str.upper()
         )
+        df = df.dropna(subset=["Time"]).copy()
 
-        df["Confidence"] = pd.to_numeric(
-            df["Confidence"],
-            errors="coerce"
-        )
-
-        df["Packets"] = pd.to_numeric(
-            df["Packets"],
-            errors="coerce"
-        )
-
-        # --------------------------------------------------------
-        # CURRENT LIVE TRAFFIC WINDOW
-        # --------------------------------------------------------
-        # The detector continuously appends to this CSV.  Do not
-        # use the Streamlit start time because the detector may
-        # already be running when the dashboard is opened.
-        #
-        # Keep only the most recent 5 minutes of captured traffic.
-        # This removes old historical rows while keeping the
-        # currently active live session visible.
-        if not df.empty and df["Time"].notna().any():
+        # Keep the latest five minutes relative to the newest timestamp in the
+        # file, not the dashboard launch time. This retains data if the detector
+        # started before the dashboard. Remove this filter to display all history.
+        if not df.empty:
             latest_time = df["Time"].max()
             live_cutoff = latest_time - pd.Timedelta(minutes=5)
             df = df[df["Time"] >= live_cutoff].copy()
 
         return df
 
+    except (OSError, pd.errors.ParserError, UnicodeError) as e:
+        st.error(f"Unable to read live detection results: {e}")
+        st.caption(f"CSV file: {RESULT_FILE}")
+        return pd.DataFrame()
     except Exception as e:
-
-        st.error(
-            f"Unable to read detection results: {e}"
-        )
-
+        st.error(f"Unexpected error while loading live detection results: {e}")
+        st.caption(f"CSV file: {RESULT_FILE}")
         return pd.DataFrame()
 
 
@@ -690,3 +670,4 @@ else:
         "Demo Attack Mode is paused. Disable the checkbox "
         "to return to live traffic monitoring."
     )
+

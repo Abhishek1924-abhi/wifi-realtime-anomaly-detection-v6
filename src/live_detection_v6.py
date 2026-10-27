@@ -1,4 +1,4 @@
-import os
+﻿import os
 import time
 import math
 import joblib
@@ -24,18 +24,18 @@ print("=" * 70)
 # PATHS
 # ============================================================
 
-MODEL_PATH = r"..\model\v6\random_forest_v6.pkl"
-SCALER_PATH = r"..\model\v6\scaler_v6.pkl"
-FEATURE_PATH = r"..\model\v6\features_v6.pkl"
+# Resolve paths from the project root (the parent of this script's src directory).
+# This works whether the script is launched from the project root or from src/.
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
 
-RESULT_DIR = r"..\data\results\v6\live"
+MODEL_PATH = os.path.join(PROJECT_ROOT, "model", "v6", "random_forest_v6.pkl")
+SCALER_PATH = os.path.join(PROJECT_ROOT, "model", "v6", "scaler_v6.pkl")
+FEATURE_PATH = os.path.join(PROJECT_ROOT, "model", "v6", "features_v6.pkl")
 
+RESULT_DIR = os.path.join(PROJECT_ROOT, "data", "results", "v6", "live")
 os.makedirs(RESULT_DIR, exist_ok=True)
-
-RESULT_FILE = os.path.join(
-    RESULT_DIR,
-    "live_detection_results.csv"
-)
+RESULT_FILE = os.path.join(RESULT_DIR, "live_detection_results.csv")
 
 
 # ============================================================
@@ -101,8 +101,20 @@ FEATURES = joblib.load(FEATURE_PATH)
 print("Features expected by V6:", len(FEATURES))
 
 if len(FEATURES) != 68:
+    raise ValueError(f"Expected 68 features, found {len(FEATURES)}")
+
+if len(set(FEATURES)) != len(FEATURES):
+    raise ValueError("The saved feature list contains duplicate names.")
+
+model_feature_count = getattr(model, "n_features_in_", None)
+scaler_feature_count = getattr(scaler, "n_features_in_", None)
+if model_feature_count is not None and model_feature_count != len(FEATURES):
     raise ValueError(
-        f"Expected 68 features, found {len(FEATURES)}"
+        f"Model expects {model_feature_count} features but features_v6.pkl has {len(FEATURES)}."
+    )
+if scaler_feature_count is not None and scaler_feature_count != len(FEATURES):
+    raise ValueError(
+        f"Scaler expects {scaler_feature_count} features but features_v6.pkl has {len(FEATURES)}."
     )
 
 
@@ -198,14 +210,19 @@ CSV_COLUMNS = [
 ]
 
 
-if not os.path.exists(RESULT_FILE):
-
-    pd.DataFrame(
-        columns=CSV_COLUMNS
-    ).to_csv(
-        RESULT_FILE,
-        index=False
-    )
+if not os.path.exists(RESULT_FILE) or os.path.getsize(RESULT_FILE) == 0:
+    pd.DataFrame(columns=CSV_COLUMNS).to_csv(RESULT_FILE, index=False)
+else:
+    # Avoid silently appending current rows beneath a stale/incompatible CSV header.
+    try:
+        existing_columns = list(pd.read_csv(RESULT_FILE, nrows=0).columns)
+    except Exception:
+        existing_columns = []
+    if existing_columns != CSV_COLUMNS:
+        backup_path = RESULT_FILE + ".backup_" + datetime.now().strftime("%Y%m%d_%H%M%S")
+        os.replace(RESULT_FILE, backup_path)
+        pd.DataFrame(columns=CSV_COLUMNS).to_csv(RESULT_FILE, index=False)
+        print("Existing result CSV had a different/invalid header; moved it to:", backup_path)
 
 
 # ============================================================
@@ -302,6 +319,46 @@ def clean_value(value):
 
 
 # ============================================================
+# PACKET HELPERS
+# ============================================================
+
+def packet_timestamp(packet):
+    """Return Scapy's capture timestamp when available, otherwise wall-clock time."""
+    try:
+        value = float(packet.time)
+        if math.isfinite(value):
+            return value
+    except (AttributeError, TypeError, ValueError):
+        pass
+    return time.time()
+
+
+def ip_packet_length(packet):
+    """Use the IP datagram length, excluding Ethernet/Wi-Fi link-layer headers."""
+    try:
+        value = int(packet[IP].len)
+        if value > 0:
+            return value
+    except (AttributeError, TypeError, ValueError):
+        pass
+    try:
+        return len(packet[IP])
+    except Exception:
+        return len(packet)
+
+
+def transport_header_length(packet):
+    """Return the IP plus transport header length for a captured IP packet."""
+    ip_header = int(packet[IP].ihl or 5) * 4
+    if TCP in packet:
+        tcp_header = int(packet[TCP].dataofs or 5) * 4
+        return ip_header + tcp_header
+    if UDP in packet:
+        return ip_header + 8
+    return ip_header
+
+
+# ============================================================
 # FLOW KEY
 # ============================================================
 
@@ -395,9 +452,7 @@ def create_flow(packet):
             packet[UDP].dport
         )
 
-    now = time.time()
-
-    packet_length = len(packet)
+    now = packet_timestamp(packet)
 
     flow = {
 
@@ -459,13 +514,9 @@ def create_flow(packet):
 
 def update_flow(flow, packet, forward=True):
 
-    now = time.time()
-
-    packet_length = len(packet)
-
-    previous_time = flow["last"]
-
-    flow["last"] = now
+    now = packet_timestamp(packet)
+    packet_length = ip_packet_length(packet)
+    flow["last"] = max(float(flow["last"]), now)
 
     flow["all_times"].append(now)
 
@@ -483,29 +534,24 @@ def update_flow(flow, packet, forward=True):
 
         flow["forward_bytes"] += packet_length
 
-        if packet_length > 0:
-
+        # CICIDS-style act_data_pkt_fwd counts forward packets carrying payload,
+        # not every non-empty packet (e.g. pure TCP ACKs have no payload).
+        try:
+            payload_length = len(bytes(packet[IP].payload.payload))
+        except Exception:
+            payload_length = 0
+        if payload_length > 0:
             flow["act_data_pkt_fwd"] += 1
 
         if IP in packet:
-
-            header_length = int(
-                packet[IP].ihl * 4
-            )
-
-            flow["fwd_header_lengths"].append(
-                header_length
-            )
-
+            header_length = transport_header_length(packet)
+            flow["fwd_header_lengths"].append(header_length)
+            segment_size = header_length
             if flow["min_seg_size_forward"] == 0:
-
-                flow["min_seg_size_forward"] = packet_length
-
+                flow["min_seg_size_forward"] = segment_size
             else:
-
                 flow["min_seg_size_forward"] = min(
-                    flow["min_seg_size_forward"],
-                    packet_length
+                    flow["min_seg_size_forward"], segment_size
                 )
 
     else:
@@ -523,14 +569,8 @@ def update_flow(flow, packet, forward=True):
         flow["backward_bytes"] += packet_length
 
         if IP in packet:
-
-            header_length = int(
-                packet[IP].ihl * 4
-            )
-
-            flow["bwd_header_lengths"].append(
-                header_length
-            )
+            header_length = transport_header_length(packet)
+            flow["bwd_header_lengths"].append(header_length)
 
 
     # ========================================================
@@ -1006,6 +1046,24 @@ def predict_flow(flow):
     features = build_features(
         flow
     )
+    print("\n--- LIVE FEATURE DIAGNOSTIC ---")
+    print("Forward packets:", flow["forward_count"])
+    print("Backward packets:", flow["backward_count"])
+    print("Forward bytes:", flow["forward_bytes"])
+    print("Backward bytes:", flow["backward_bytes"])
+
+    for name in [
+        "Destination Port",
+        "Flow Duration",
+        "Total Fwd Packets",
+        "Total Backward Packets",
+        "Average Packet Size",
+        "Bwd Packet Length Mean",
+        "Packet Length Variance",
+        "Flow Bytes/s",
+        "Flow Packets/s",
+    ]:
+        print(f"{name}: {features.get(name, 'MISSING')}")
 
 
     # ========================================================
@@ -1043,9 +1101,7 @@ def predict_flow(flow):
     # SCALE
     # ========================================================
 
-    X_scaled = scaler.transform(
-        row
-    )
+    X_scaled = scaler.transform(row.to_numpy())
 
 
     # ========================================================
@@ -1554,3 +1610,6 @@ except KeyboardInterrupt:
     print(
         "Live detection stopped."
     )
+
+
+
