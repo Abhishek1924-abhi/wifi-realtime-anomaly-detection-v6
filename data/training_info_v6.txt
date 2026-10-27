@@ -1,0 +1,17 @@
+V6 SUPERVISED RANDOM FOREST MODEL
+Training rows: 2128000
+Features: 68
+Benign rows: 1704301
+Attack rows: 423699
+
+Attack labels used:
+Bot
+DDoS
+DoS GoldenEye
+DoS Hulk
+DoS Slowhttptest
+DoS slowloris
+FTP-Patator
+Heartbleed
+PortScan
+SSH-Patator
